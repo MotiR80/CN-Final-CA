@@ -1,0 +1,3 @@
+/home/motir80/Desktop/CN_Homeworks3/cmake-build-debug/CMakeFiles/CN_Homeworks3.dir
+/home/motir80/Desktop/CN_Homeworks3/cmake-build-debug/CMakeFiles/edit_cache.dir
+/home/motir80/Desktop/CN_Homeworks3/cmake-build-debug/CMakeFiles/rebuild_cache.dir
