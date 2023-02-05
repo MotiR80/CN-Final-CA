@@ -21,7 +21,7 @@ using namespace std::chrono;
 using namespace std;
 
 #define PORT     11005
-#define lineLength 1500
+#define lineLength 1536
 #define BUFF_SIZE 2048
 #define SWS 1
 #define INTERVAL 150
@@ -30,7 +30,7 @@ using namespace std;
 
 pthread_t tid;
 
-int currentSWS = SWS;
+int cwnd = SWS;
 int ssthresh = INFINITE;
 int maxSWS = -INFINITE;
 
@@ -40,12 +40,12 @@ struct sockaddr_in servAddr;
 vector<string> frames;
 vector<int> unReceivedAcks;
 bool lastAckReceived = false;
-int nHost;
+
 int nTimeout = 0;
 
 int lar = 0, lfs = 0;
 
-vector<int> FrameContent(char buffer[]);
+int FrameContent(char buffer[]);
 
 string readFile(string fileName);
 
@@ -56,8 +56,6 @@ void* recieveAck(void* args);
 void timeoutHandle(int a);
 
 int main() {
-
-    nHost = 1;
 
     if ((sockSD = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
         perror("socket creation failed\n");
@@ -70,31 +68,38 @@ int main() {
     servAddr.sin_port = htons(PORT);
     servAddr.sin_addr.s_addr = INADDR_ANY;
 
-    int n;
-    socklen_t len;
 
-    string input = readFile("out-1MB.dt");
+    string input = readFile("test.txt");
     frames = makeFrame(lineLength, input);
 
 
 
     auto start = high_resolution_clock::now();
+
+    string str = to_string(frames.size());
+    char num_char[str.length()];
+    strcpy(num_char, str.c_str());
+
+    sendto(sockSD, num_char, BUFF_SIZE+1,
+           MSG_CONFIRM, (const struct sockaddr *) &servAddr,
+           sizeof(servAddr));
+
     pthread_create(&tid, nullptr, recieveAck, nullptr);
 
 
     while(!lastAckReceived) {
         while(lfs >= frames.size())
             continue;
-        if(lfs-lar < currentSWS) {
+        if(lfs-lar < cwnd) {
             string SNS = to_string(lfs+1);
 
-            int n = to_string(nHost).length() + SNS.length() + frames[lfs].length() + 3;
+            int n = SNS.length() + frames[lfs].length() + 1;
 
             n += to_string(n).length();
-            char char_array[n+1] = {0};
-            strcpy(char_array, (SNS + " " + to_string(nHost) + " " + to_string(n) + " " + frames[lfs]).c_str());
+            char char_array[n+1];
+            strcpy(char_array, (SNS + " " + frames[lfs]).c_str());
 
-            sendto(sockSD, char_array, sizeof(char_array),
+            sendto(sockSD, char_array, BUFF_SIZE+1,
                    MSG_CONFIRM, (const struct sockaddr *) &servAddr,
                    sizeof(servAddr));
 
@@ -105,23 +110,25 @@ int main() {
     auto duration = duration_cast<microseconds>(stop - start);
 
     pthread_join(tid, nullptr);
+    cout << "Duration of transmission for a 1MB file test.txt: " << duration.count() / 1000000 << " seconds" << endl;
     close(sockSD);
     return 0;
 }
 
-vector<int> FrameContent(char buffer[]) {
-    string ContS[2] = {""};
-    int start = 0;
-    for(int j = 0; j < 2; j++)
-        for(int i = start; i < lineLength; i++) {
-            if(buffer[i] == ' ') {
-                start = i+1;
-                break;
-            }
-            ContS[j] += buffer[i];
-        }
+int FrameContent(char buffer[]) {
+    int seqN;
+    string temp = "";
 
-    return vector<int>{stoi(ContS[0]), stoi(ContS[1])};
+    int i = 0;
+    while (true) {
+        if (buffer[i] == ' ')
+            break;
+
+        temp += buffer[i];
+        i++;
+    }
+    seqN = stoi(temp);
+    return seqN;
 }
 
 string readFile(string fileName) {
@@ -137,43 +144,26 @@ string readFile(string fileName) {
 }
 
 void* recieveAck(void* args) {
-    while(true) {
+    while(lar < frames.size()) {
         struct itimerval it_val;
         it_val.it_value.tv_sec = INTERVAL/1000;
         it_val.it_value.tv_usec = (INTERVAL*1000) % 1000000;
         it_val.it_interval = it_val.it_value;
         memset(&buffer, 0, sizeof(buffer));
         signal(SIGALRM, timeoutHandle);
+//alarm(TIME_OUT_DUR);
         setitimer(ITIMER_REAL, &it_val, NULL);
-        recvfrom(sockSD, (char *)buffer, BUFF_SIZE + 1,
-                 MSG_WAITALL, (struct sockaddr *) &servAddr,
+        recvfrom(sockSD, (char *)buffer, BUFF_SIZE+1,
+                 MSG_WAITALL, ( struct sockaddr *) &servAddr,
                  (socklen_t*)&servAddr);
-
-        vector<int> frameInfo = FrameContent(buffer);
-        int SN = frameInfo[0];
-        int dest = frameInfo[1];
-
-        // Part 2
-        if(dest != nHost)
-            continue;
-
+        int SN = FrameContent(buffer);
         cout << "ack received for packet " << atoi(buffer) << endl << endl;
-        if(SN == frames.size() && lar+1 == frames.size()) {
-            lastAckReceived = true;
-            break;
-        }
-        if(lar+1 == SN) { //if ACK happens
+        cerr << lar << " " << SN << endl;
+        if(lar+1 == SN) {
             cout << "sliding the window to the right...\n";
-            if(currentSWS < ssthresh){
-                currentSWS *= 2;
-                maxSWS = max(maxSWS, currentSWS);
-            }
-            else
-                currentSWS++;
-            nTimeout = 0;
             sort(unReceivedAcks.begin(), unReceivedAcks.end(), greater <>());
             lar++;
-            for(int i = unReceivedAcks.size() - 1; i >= 0; i--)
+            for(int i = unReceivedAcks.size()-1; i >= 0; i--)
                 if(lar+1 == unReceivedAcks[i]) {
                     lar++;
                     unReceivedAcks.pop_back();
@@ -182,6 +172,10 @@ void* recieveAck(void* args) {
             unReceivedAcks.push_back(SN);
         }
     }
+    char *transmitComplete = (char*)(to_string(frames.size()+1).c_str());
+    sendto(sockSD, transmitComplete, BUFF_SIZE+1,
+           MSG_CONFIRM, (const struct sockaddr *) &servAddr,
+           sizeof(servAddr));
     return nullptr;
 }
 
@@ -189,8 +183,8 @@ void timeoutHandle(int a) {
     cout << "Time Out Occured!\n\n";
     nTimeout++;
     if(nTimeout >= 1) {
-        ssthresh = currentSWS / 2;
-        currentSWS = 1;
+        ssthresh = cwnd / 2;
+        cwnd = 1;
     }
     unReceivedAcks.clear();
     lfs = lar;
